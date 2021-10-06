@@ -16,6 +16,7 @@ import argparse
 import os
 import re
 import boto3
+import requests
 
 REGION = None
 DRYRUN = None
@@ -41,10 +42,11 @@ def initialize():
 def handler(event, context):
     initialize()
     if REGION == "None":
-        ec2_client = boto3.client('ec2')
-        available_regions = ec2_client.describe_regions()['Regions']
-        for region in available_regions:
-            discover_delete_images(region['RegionName'])
+        partitions = requests.get("https://raw.githubusercontent.com/boto/botocore/develop/botocore/data/endpoints.json").json()['partitions']
+        for partition in partitions:
+            if partition['partition'] == "aws":
+                for endpoint in partition['services']['ecs']['endpoints']:
+                    discover_delete_images(endpoint)
     else:
         discover_delete_images(REGION)
 
