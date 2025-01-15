@@ -11,8 +11,10 @@ CONDITIONS OF ANY KIND, either express or implied. See the License for the speci
 limitations under the License.
 '''
 from __future__ import print_function
-
 import argparse
+import sys
+from datetime import datetime, timedelta
+from dateutil.tz import tzutc
 import os
 import re
 import boto3
@@ -20,6 +22,7 @@ import boto3
 REGION = None
 DRYRUN = None
 IMAGES_TO_KEEP = None
+OLDER_THAN = None
 IGNORE_TAGS_REGEX = None
 
 
@@ -27,6 +30,7 @@ def initialize():
     global REGION
     global DRYRUN
     global IMAGES_TO_KEEP
+    global OLDER_THAN
     global IGNORE_TAGS_REGEX
 
     REGION = os.environ.get('REGION', "None")
@@ -36,6 +40,7 @@ def initialize():
     else:
         DRYRUN = True
     IMAGES_TO_KEEP = int(os.environ.get('IMAGES_TO_KEEP', 100))
+    OLDER_THAN = parse_interval(os.environ.get('OLDER_THAN', 'None'))
     IGNORE_TAGS_REGEX = os.environ.get('IGNORE_TAGS_REGEX', "^$")
 
 def handler(event, context):
@@ -126,9 +131,9 @@ def discover_delete_images(regionname):
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
                         if not running_sha or image['imageDigest'] not in running_sha:
-                            append_to_list(deletesha, image['imageDigest'])
-                            append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
-                                                           "pushedAt": image["imagePushedAt"]})
+                            if OLDER_THAN == None or image["imagePushedAt"] < OLDER_THAN:
+                                append_to_list(deletesha, image['imageDigest'])
+                                append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag, "pushedAt": image["imagePushedAt"]})
         if deletesha:
             print("Number of images to be deleted: {}".format(len(deletesha)))
             delete_images(
@@ -183,6 +188,20 @@ def delete_images(ecr_client, deletesha, deletetag, repo_id, name):
         for ids in deletetag:
             print("- {} - {}".format(ids["imageUrl"], ids["pushedAt"]))
 
+def parse_interval(time_interval):
+    if time_interval == 'None':
+        return None
+
+    time_parts = re.match(r'^(\d+)([mhdw])s?$', time_interval.strip())
+    if time_parts == None:
+        print('Invalid time format: "%s"' % time_interval, file=sys.stderr)
+        exit(1)
+
+    seconds_per_unit = { 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800 }
+    (num, unit) = time_parts.groups()
+    seconds = float(num) * seconds_per_unit[unit]
+    return datetime.now(tzutc()) - timedelta(seconds=seconds)
+
 
 # Below is the test harness
 if __name__ == '__main__':
@@ -194,6 +213,8 @@ if __name__ == '__main__':
                         dest='imagestokeep')
     PARSER.add_argument('-region', help='ECR/ECS region', default=None, action='store', dest='region')
     PARSER.add_argument('-ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store', dest='ignoretagsregex')
+    PARSER.add_argument('-olderthan', help='Only delete images older than specified date interval (e.g. 30m, 12h, 3d, 1w)', default='None', action='store', dest='olderthan')
+
 
     ARGS = PARSER.parse_args()
     if ARGS.region:
@@ -202,5 +223,6 @@ if __name__ == '__main__':
         os.environ["REGION"] = "None"
     os.environ["DRYRUN"] = ARGS.dryrun.lower()
     os.environ["IMAGES_TO_KEEP"] = ARGS.imagestokeep
+    os.environ["OLDER_THAN"] = ARGS.olderthan
     os.environ["IGNORE_TAGS_REGEX"] = ARGS.ignoretagsregex
     handler(REQUEST, None)
