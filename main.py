@@ -110,14 +110,38 @@ def discover_delete_images(regionname):
         tagged_images.sort(key=lambda k: k['imagePushedAt'], reverse=True)
 
         # Get ImageDigest from ImageURL for running images. Do this for every repository
-        running_sha = []
-        for image in tagged_images:
-            for tag in image['imageTags']:
-                imageurl = repository['repositoryUri'] + ":" + tag
-                for runningimages in running_containers:
-                    if imageurl == runningimages:
-                        if imageurl not in running_sha:
-                            running_sha.append(image['imageDigest'])
+        running_sha = set()
+        for running_image in running_containers:
+            repository_uri = repository['repositoryUri']
+            
+            # get uri from running image - cut off the tag and digest
+            # extract the base repository URI from running_image, excluding the tag or digest.
+            uri = re.search(r"^[^@:]+", running_image).group(0)
+            if not uri == repository_uri:
+                # Ensures that the base repository URI matches the current repository
+                # (repository['repositoryUri']), filtering out irrelevant images.
+                continue
+            
+            # Get the digest of the running image        
+
+            # check if image is directly referenced by digest e.g. @sha256:1234567890abcdef
+            running_digest_match = re.search(r"@([^@]+)$", running_image)
+            if running_digest_match:
+                #In some cases, running containers may reference images directly by their digest instead of by a tag.
+                digest = running_digest_match.group(1)
+            else:
+                # the image is referenced by tag - lookup the digest for this tag
+                tag = running_image.split(":")[1]        
+                try:
+                    image = [x for x in tagged_images if tag in x['imageTags']]
+                    digest = image[0]['imageDigest']
+                except:
+                    # A container is using an image that does not exist anymore?
+                    print("Error: Image tag '{}' not found in tagged images".format(tag))
+                    continue
+
+            if digest:
+                running_sha.add(digest)
 
         print("Number of running images found {}".format(len(running_sha)))
         ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
