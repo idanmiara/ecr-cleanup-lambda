@@ -14,7 +14,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: main.handler
-      Runtime: python2.7
+      Runtime: python3.13
       Description: ECR Cleanup Lambda
       CodeUri: ./
       MemorySize: 128
