@@ -49,28 +49,78 @@ def handler(event, context):
         discover_delete_images(REGION)
 
 
-def discover_delete_images(regionname):
-    print("Discovering images in " + regionname)
-    ecr_client = boto3.client('ecr', region_name=regionname)
+def get_running_digests_sha_old(running_containers, repository, tagged_images) -> set:
+    running_digests_sha = set()
+    for image in tagged_images:
+        for tag in image['imageTags']:
+            image_url = repository['repositoryUri'] + ":" + tag
+            for running_images in running_containers:
+                if image_url == running_images:
+                    digest = image['imageDigest']
+                    running_digests_sha.add(digest)
+    return running_digests_sha
+
+
+def get_running_digests_sha(running_containers, repository, tagged_images) -> set:
+    running_digests_sha = set()
+    for running_image in running_containers:
+        repository_uri = repository['repositoryUri']
+
+        # get uri from running image - cut off the tag and digest
+        # extract the base repository URI from running_image, excluding the tag or digest.
+        uri = re.search(r"^[^@:]+", running_image).group(0)
+        if uri != repository_uri:
+            # Ensures that the base repository URI matches the current repository
+            # (repository['repositoryUri']), filtering out irrelevant images.
+            continue
+
+        # Get the digest of the running image
+
+        # check if image is directly referenced by digest e.g. @sha256:1234567890abcdef
+        running_digest_match = re.search(r"@([^@]+)$", running_image)
+        if running_digest_match:
+            # In some cases, running containers may reference images directly by their digest instead of by a tag.
+            digest = running_digest_match.group(1)
+        else:
+            # the image is referenced by tag - lookup the digest for this tag
+            tag = running_image.split(":")[1]
+            image_tags = [x for x in tagged_images if tag in x['imageTags']]
+            if image_tags:
+                digest = image_tags[0]['imageDigest']
+            else:
+                # A container is using an image that does not exist anymore?
+                print(f"Error: Image with '{tag=}' not found in tagged images, "
+                      f"Is {running_image=} is using an image that does not exist anymore? ")
+                continue
+
+        if digest:
+            running_digests_sha.add(digest)
+
+    return running_digests_sha
+
+
+def discover_delete_images(region_name: str):
+    print("Discovering images in " + region_name)
+    ecr_client = boto3.client('ecr', region_name=region_name)
 
     repositories = []
     describe_repo_paginator = ecr_client.get_paginator('describe_repositories')
-    for response_listrepopaginator in describe_repo_paginator.paginate():
-        for repo in response_listrepopaginator['repositories']:
+    for describe_repo_response in describe_repo_paginator.paginate():
+        for repo in describe_repo_response['repositories']:
             repositories.append(repo)
 
-    ecs_client = boto3.client('ecs', region_name=regionname)
+    ecs_client = boto3.client('ecs', region_name=region_name)
 
-    listclusters_paginator = ecs_client.get_paginator('list_clusters')
     running_containers = []
-    for response_listclusterpaginator in listclusters_paginator.paginate():
-        for cluster in response_listclusterpaginator['clusterArns']:
-            listtasks_paginator = ecs_client.get_paginator('list_tasks')
-            for reponse_listtaskpaginator in listtasks_paginator.paginate(cluster=cluster, desiredStatus='RUNNING'):
-                if reponse_listtaskpaginator['taskArns']:
+    list_clusters_paginator = ecs_client.get_paginator('list_clusters')
+    for response_clusters_list_paginator in list_clusters_paginator.paginate():
+        for cluster in response_clusters_list_paginator['clusterArns']:
+            list_tasks_paginator = ecs_client.get_paginator('list_tasks')
+            for list_tasks_response in list_tasks_paginator.paginate(cluster=cluster, desiredStatus='RUNNING'):
+                if list_tasks_response['taskArns']:
                     describe_tasks_list = ecs_client.describe_tasks(
                         cluster=cluster,
-                        tasks=reponse_listtaskpaginator['taskArns']
+                        tasks=list_tasks_response['taskArns']
                     )
 
                     for tasks_list in describe_tasks_list['tasks']:
@@ -83,6 +133,29 @@ def discover_delete_images(regionname):
                                     if container['image'] not in running_containers:
                                         running_containers.append(container['image'])
 
+    # example of `image`
+    # {
+    #     "registryId": "123456789012",
+    #     "repositoryName": "my-repo",
+    #     "imageDigest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    #     "imageTags": ["latest", "v1.0.0"],
+    #     "imagePushedAt": "2025-01-01T12:00:00Z",
+    #     "imageSizeInBytes": 12345678,
+    #     "lastRecordedPullTime": "2025-01-10T15:30:00Z",
+    #     "artifactMediaType": "application/vnd.docker.container.image.v1+json"
+    # }
+    # Explanation of Fields
+    # registryId: The AWS account ID associated with the image.
+    # repositoryName: The name of the ECR repository where the image is stored.
+    # imageDigest: A unique identifier for the image, derived from the image's contents (SHA-256 hash).
+    # imageTags: A list of tags associated with the image, e.g., "latest", "v1.0.0".
+    # If the image is untagged, this field is absent.
+    # imagePushedAt: The timestamp of when the image was pushed to the repository.
+    # imageSizeInBytes: The size of the image in bytes.
+    # lastRecordedPullTime: The timestamp of the last time the image was pulled from the repository.
+    # This field may be null if the image has never been pulled.
+    # artifactMediaType: The media type of the image artifact.
+
     print("Images that are running:")
     for image in running_containers:
         print(image)
@@ -90,51 +163,44 @@ def discover_delete_images(regionname):
     for repository in repositories:
         print("------------------------")
         print("Starting with repository :" + repository['repositoryUri'])
-        deletesha = []
-        deletetag = []
+        delete_sha = []
+        delete_tag = []
         tagged_images = []
 
-        describeimage_paginator = ecr_client.get_paginator('describe_images')
-        for response_describeimagepaginator in describeimage_paginator.paginate(
+        describe_image_paginator = ecr_client.get_paginator('describe_images')
+        for describe_image_response in describe_image_paginator.paginate(
                 registryId=repository['registryId'],
                 repositoryName=repository['repositoryName']):
-            for image in response_describeimagepaginator['imageDetails']:
+            for image in describe_image_response['imageDetails']:
                 if 'imageTags' in image:
                     tagged_images.append(image)
                 else:
-                    append_to_list(deletesha, image['imageDigest'])
+                    append_to_list(delete_sha, image['imageDigest'])
 
-        print("Total number of images found: {}".format(len(tagged_images) + len(deletesha)))
-        print("Number of untagged images found {}".format(len(deletesha)))
+        print("Total number of images found: {}".format(len(tagged_images) + len(delete_sha)))
+        print("Number of untagged images found {}".format(len(delete_sha)))
 
         tagged_images.sort(key=lambda k: k['imagePushedAt'], reverse=True)
 
         # Get ImageDigest from ImageURL for running images. Do this for every repository
-        running_sha = []
-        for image in tagged_images:
-            for tag in image['imageTags']:
-                imageurl = repository['repositoryUri'] + ":" + tag
-                for runningimages in running_containers:
-                    if imageurl == runningimages:
-                        if imageurl not in running_sha:
-                            running_sha.append(image['imageDigest'])
+        running_digests_sha = get_running_digests_sha(running_containers, repository, tagged_images)
 
-        print("Number of running images found {}".format(len(running_sha)))
+        print("Number of running images found {}".format(len(running_digests_sha)))
         ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
         for image in tagged_images:
             if tagged_images.index(image) >= IMAGES_TO_KEEP:
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
-                        if not running_sha or image['imageDigest'] not in running_sha:
-                            append_to_list(deletesha, image['imageDigest'])
-                            append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
+                        if not running_digests_sha or image['imageDigest'] not in running_digests_sha:
+                            append_to_list(delete_sha, image['imageDigest'])
+                            append_to_tag_list(delete_tag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
                                                            "pushedAt": image["imagePushedAt"]})
-        if deletesha:
-            print("Number of images to be deleted: {}".format(len(deletesha)))
+        if delete_sha:
+            print("Number of images to be deleted: {}".format(len(delete_sha)))
             delete_images(
                 ecr_client,
-                deletesha,
-                deletetag,
+                delete_sha,
+                delete_tag,
                 repository['registryId'],
                 repository['repositoryName']
             )
