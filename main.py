@@ -49,6 +49,63 @@ def handler(event, context):
         discover_delete_images(REGION)
 
 
+def get_running_containers(ecs_client):
+    running_containers = set()  # Actually, used container images
+    clusters_list_paginator = ecs_client.get_paginator('list_clusters')
+    for clusters_list in clusters_list_paginator.paginate():
+        for cluster_arn in clusters_list['clusterArns']:
+            print("cluster " + cluster_arn)
+
+            tasks_list_paginator = ecs_client.get_paginator('list_tasks')
+            for tasks_list in tasks_list_paginator.paginate(cluster=cluster_arn, desiredStatus='RUNNING'):
+                if tasks_list['taskArns']:
+                    describe_tasks_list = ecs_client.describe_tasks(
+                        cluster=cluster_arn,
+                        tasks=tasks_list['taskArns']
+                    )
+
+                    for tasks_list in describe_tasks_list['tasks']:
+                        if tasks_list['taskDefinitionArn'] is not None:
+                            response = ecs_client.describe_task_definition(
+                                taskDefinition=tasks_list['taskDefinitionArn']
+                            )
+                            for container in response['taskDefinition']['containerDefinitions']:
+                                if '.dkr.ecr.' in container['image'] and ":" in container['image']:
+                                    running_containers.add(container['image'])
+
+    return sorted(running_containers)
+
+
+def get_running_containers_from_services(ecs_client):
+    running_containers = set()  # Actually, used container images
+    clusters_list_paginator = ecs_client.get_paginator('list_clusters')
+    for clusters_list in clusters_list_paginator.paginate():
+        for cluster_arn in clusters_list['clusterArns']:
+            print("cluster " + cluster_arn)
+            # List services in the cluster
+            services_response = ecs_client.list_services(cluster=cluster_arn)
+            service_arns = services_response['serviceArns']
+
+            # Describe the service to get details
+            services_details = ecs_client.describe_services(cluster=cluster_arn, services=service_arns)[
+                'services'] if service_arns else []
+
+            for service in services_details:
+                # Get task definition for the service
+                task_definition_arn = service['taskDefinition']
+                task_definition_response = ecs_client.describe_task_definition(taskDefinition=task_definition_arn)
+                task_definition = task_definition_response['taskDefinition']
+
+                # Extract container images from task definition
+                container_definitions = task_definition['containerDefinitions']
+                for container_definition in container_definitions:
+                    container_image = container_definition['image']
+                    print(f"Service: {service['serviceName']}, Container Image: {container_image}")
+                    running_containers.add(container_image)
+
+    return sorted(running_containers)
+
+
 def discover_delete_images(regionname):
     print("Discovering images in " + regionname)
     ecr_client = boto3.client('ecr', region_name=regionname)
@@ -61,27 +118,7 @@ def discover_delete_images(regionname):
 
     ecs_client = boto3.client('ecs', region_name=regionname)
 
-    listclusters_paginator = ecs_client.get_paginator('list_clusters')
-    running_containers = []
-    for response_listclusterpaginator in listclusters_paginator.paginate():
-        for cluster in response_listclusterpaginator['clusterArns']:
-            listtasks_paginator = ecs_client.get_paginator('list_tasks')
-            for reponse_listtaskpaginator in listtasks_paginator.paginate(cluster=cluster, desiredStatus='RUNNING'):
-                if reponse_listtaskpaginator['taskArns']:
-                    describe_tasks_list = ecs_client.describe_tasks(
-                        cluster=cluster,
-                        tasks=reponse_listtaskpaginator['taskArns']
-                    )
-
-                    for tasks_list in describe_tasks_list['tasks']:
-                        if tasks_list['taskDefinitionArn'] is not None:
-                            response = ecs_client.describe_task_definition(
-                                taskDefinition=tasks_list['taskDefinitionArn']
-                            )
-                            for container in response['taskDefinition']['containerDefinitions']:
-                                if '.dkr.ecr.' in container['image'] and ":" in container['image']:
-                                    if container['image'] not in running_containers:
-                                        running_containers.append(container['image'])
+    running_containers = get_running_containers()
 
     print("Images that are running:")
     for image in running_containers:
