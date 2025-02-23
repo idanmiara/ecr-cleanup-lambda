@@ -42,6 +42,7 @@ class Inputs:
     protect_tags_regex: re.Pattern | None = None
     protect_latest: bool | None = None
     check_ecs: bool | None = None
+    check_lambda: bool | None = None
     check_eks: bool | None = None
     connect_timeout: int | None = None
     read_timeout: int | None = None
@@ -104,6 +105,12 @@ class Inputs:
             else:
                 raise Exception(f"Unexpected {type(self.check_ecs)=}")
 
+        if not isinstance(self.check_lambda, bool):
+            if isinstance(self.check_lambda, str):
+                self.check_lambda = (self.check_lambda or "false").lower() != 'false'
+            else:
+                raise Exception(f"Unexpected {type(self.check_lambda)=}")
+
         if not isinstance(self.check_eks, bool):
             if isinstance(self.check_eks, str):
                 self.check_eks = (self.dryrun or "false").lower() != 'false'
@@ -125,6 +132,7 @@ class Inputs:
             protect_tags_regex=os.environ.get('PROTECT_TAGS_REGEX'),
             protect_latest=os.environ.get('PROTECT_LATEST'),
             check_ecs=os.environ.get('CHECK_ECS'),
+            check_lambda=os.environ.get('CHECK_LAMBDA'),
             check_eks=os.environ.get('CHECK_EKS'),
             connect_timeout=os.environ.get('CONNECT_TIMEOUT'),
             read_timeout=os.environ.get('READ_TIMEOUT'),
@@ -164,6 +172,8 @@ class Inputs:
                             dest="protect_latest", action='store_false')
         parser.add_argument('-no-ecs', help="Don't search ECS for running images",
                             dest="check_ecs", action='store_false')
+        parser.add_argument('-no-lambda', help="Don't search Lambda for running images",
+                            dest="check_lambda", action='store_false')
         parser.add_argument('-no-eks', help="Don't search EKS for running images",
                             dest="check_eks", action='store_false')
 
@@ -184,6 +194,7 @@ class Inputs:
             protect_tags_regex=args.protect_tags_regex,
             protect_latest=args.protect_latest,
             check_ecs=args.check_ecs,
+            check_lambda=args.check_lambda,
             check_eks=args.check_eks,
             connect_timeout=args.connect_timeout,
             read_timeout=args.read_timeout,
@@ -422,6 +433,14 @@ def get_running_containers(ecs_client, inputs: Inputs):
         running_containers_ecs = []
         logger.info('Skip checking running containers on ECS...')
 
+    if inputs.check_lambda:
+        running_containers_lambda = get_running_containers_from_lambda(inputs.region, logger)
+        logger.info(f"{len(running_containers_lambda)} running containers "
+                    f"from Lambda: {sorted(running_containers_lambda)}...")
+    else:
+        running_containers_lambda = []
+        logger.info('Skip checking running containers on Lambda...')
+
     if inputs.check_eks:
         running_containers_eks = get_running_containers_from_eks(logger)
         logger.info(f"{len(running_containers_eks)} running containers "
@@ -430,9 +449,23 @@ def get_running_containers(ecs_client, inputs: Inputs):
         running_containers_eks = []
         logger.info('Skip checking running containers on EKS...')
 
-    running_containers_ecs = sorted(running_containers_ecs | running_containers_eks)
+    running_containers_ecs = sorted(running_containers_ecs | running_containers_eks | running_containers_lambda)
     logger.info(f"{len(running_containers_ecs)} total running containers: {running_containers_ecs}...")
     return running_containers_ecs
+
+
+def get_running_containers_from_lambda(region_name: str, logger: logging.Logger):
+    running_containers = set()
+    lambda_client = boto3.client('lambda', region_name=region_name)
+    listlambdas_paginator = lambda_client.get_paginator('list_functions')
+    for response_listlambdapaginator in listlambdas_paginator.paginate():
+        for function in response_listlambdapaginator['Functions']:
+            if function["PackageType"] == "Image":
+                function_config = lambda_client.get_function(FunctionName=function["FunctionName"])
+                if function_config["Code"]["ImageUri"] not in running_containers:
+                    running_containers.add(function_config["Code"]["ImageUri"])
+
+    return running_containers
 
 
 def get_running_containers_from_ecs(ecs_client, logger: logging.Logger):
